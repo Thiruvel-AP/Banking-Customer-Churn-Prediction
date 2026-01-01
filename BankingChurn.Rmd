@@ -1,0 +1,738 @@
+---
+title: "BankingChurn.Rmd"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+date: "2025-12-23"
+---
+
+## Refernce used to setup and the XGBoost GPU in windows -> "https://stackoverflow.com/questions/77931563/how-to-use-xgboost-in-r-with-gpu"
+
+```{r Setup, echo=TRUE, message=FALSE, warning=FALSE, }
+knitr::opts_chunk$set(echo = TRUE)
+
+force_reinstall_everything <- FALSE ## <--- change to TRUE to force a reinstall of 
+                                    ## all packages listed in allowed.packages
+
+## ADD ANY REQUIRED PACKAGES TO THE VECTOR BELOW
+## Note: tidyverse includes:  ggplot2, dplyrtidyrreadrpurrrtibble, 
+##                            stringrforcats, and lubridate.
+allowed.packages <- c("tidyverse", 
+                      "tidymodels", 
+                      "recipes", 
+                      "parsnip", 
+                      "devtools",
+                      "bonsai", 
+                      "healthyR.ai", 
+                      "knitr", 
+                      "forcats", 
+                      "DataExplorer", 
+                      "visdat", 
+                      "rsample", 
+                      "multcomp",
+                      "dplyr", 
+                      "themis", 
+                      "jsonlite", 
+                      "data.table"
+                      )
+
+
+## DO NOT CHANGE ANYTHING ELSE IN THIS CODE BLOCK
+for (i in seq_along(allowed.packages)){
+  if(!(allowed.packages[i] %in% installed.packages()[, 1]) || force_reinstall_everything){
+    install.packages(allowed.packages[i], 
+                     dependencies = c("Depends", "Imports"),
+                     repos = "https://cloud.r-project.org")
+  }
+  library(allowed.packages[i], character.only = TRUE)
+}
+
+knitr::opts_chunk$set(echo = TRUE, collapse=TRUE)
+ignore <- runif(1) # To initialise the PRNG
+
+cat("\nList of allowed packages (pre-loaded):\n ", paste(allowed.packages, collapse="\n  "))
+
+```
+
+```{r}
+
+# Load it 
+library(xgboost)
+
+```
+
+## Load the CSV file from the path "D:/VS_Codes/DataScience/Projects/Banking_Customer_Churn/r_xgb/BankChurners.csv"
+
+```{r}
+# Seed values 
+seed_value = 123
+
+# File path of the CSV file 
+file_path = "D:/VS_Codes/DataScience/Projects/Banking_Customer_Churn/r_xgb/BankChurners.csv"
+
+# Load the CSV with read csv method and store it in df 
+df = read.csv(file = file_path, header = TRUE)
+
+# Print the head to check the CSV loaded or not 
+head(df)
+
+```
+## EDA and Preprocessings 
+
+## Basic EDA to check the detailes about the dataset 
+  # Glimpse the dataset 
+  # Columns Names 
+  # Decide the features and labels 
+  # Check the propositions of the feature and plot it
+```{r}
+
+# Glimplse the df 
+glimpse(df)
+
+```
+```{r}
+
+# Get a table of all classes
+table(sapply(df, class))
+
+```
+
+
+```{r}
+
+colnames(df)
+
+```
+The data frame has 22 columns, the feature columns is the binary values which indicates the churn state of the customer. There are 6 character columns, 15 Numeric columns, and a logical columns.   
+
+```{r}
+
+# Summarize it as a dataframe and plot the bar graph 
+feature_count.df = as.data.frame(prop.table(table(df$Attrition_Flag)) * 100)
+feature_count.df
+
+# Set the column names 
+colnames(feature_count.df) = c("Attrition_Flag", "Count_percentage")
+
+# Plot the percentage of the Attrition Flag
+ggplot(feature_count.df, aes(x = Attrition_Flag, y = Count_percentage, fill = Attrition_Flag)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = round(Count_percentage, 1)),
+            vjust = -0.5) + 
+  labs(title = "Feature Distribution", x = "Attrition_Flag", y = "Count_percentage") + 
+  theme(panel.grid.major.x = element_blank())
+
+```
+
+## Factor the label column 
+```{r}
+
+# Factor the Attrition_Flag
+df$Attrition_Flag = as.factor(df$Attrition_Flag)
+
+```
+
+The feature columns is imbalanced in the ratio of 15:58, so the feature column is under sample or over sample before the model training. 
+
+
+From the columns details, Attrition_Flag is the label to predict about the churn of the bank and rest of the columns are the labels. 
+
+## Processing pipeline with the recipe 
+# Split the data set as train test split for the preprocessing and EDA 
+```{r}
+
+# Set the seed 
+set.seed(seed_value)
+
+# Split the dataset and store it in df.split using initial split method.
+df.split = initial_split(df, prop = 0.8)
+
+
+# Store the train data in df_train and test data in df_test 
+df_train = training(df.split)
+df_test = testing(df.split)
+
+
+# Check train dataset 
+colnames(df_train) 
+```
+
+
+  # Create a recipe with the train data set and store it in the variable
+```{r}
+
+# Create a recipe and store it in a recipe.df with the feature column as Attrition_Flag
+recipe.df = recipe(Attrition_Flag ~ ., data = df_train)
+
+recipe.df
+```
+
+## Check the NA values in the entire dataset and plot it with the box plot 
+  # Create a dataframe to calculate the NA values in each column 
+  # Plot the bar graphs for the NA data frame
+```{r}
+
+# Calculate the NA values of each column in the df and store it in na.df 
+na.df = data.frame(
+  col = colnames(df), 
+  na_sum = colSums(is.na(df))
+)
+
+na.df
+```
+
+```{r}
+
+# Bar plot to plot the sum of columns 
+ggplot(na.df, aes(x = col, y = na_sum)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  theme_minimal() +
+  coord_flip() +
+  ylab("Sum of NA") +
+  xlab("Columns with NA") +
+  theme(panel.grid.major.x = element_blank())
+
+```
+
+From the bar graph, there is only one column with more than 10K na values, so remove the columns in the recipe. 
+
+## Remove the NA column 
+```{r}
+
+# Get the col to remove to store it in the col_remove 
+col_remove =  na.df %>%
+                filter(na_sum > 0) %>%
+                pull(col)
+
+col_remove
+
+
+# Update the column to removed na column in recipe as columns_to_remove 
+recipe.df = recipe.df %>% 
+              update_role(all_of(col_remove), new_role = "columns_to_remove") 
+
+recipe.df
+```
+
+## Check the outliers in the dataset 
+  # Using IQR to find the outliers in each columns and store it in the dataframe 
+  # Plot the outliers
+  
+```{r}
+
+# Create a method as count_outlier in each column using the IQR and return the dataframe 
+count_outlier = function(df) {
+  # Get the numeric column and store it in num_cols
+  num_cols = sapply(df, is.numeric)
+  
+  # Loop each columns in the dataframe using sapply 
+  # Calculate the outliers of the each columns 
+  # Store it in the ouliter.df 
+  outlier.df = data.frame(
+    column = names(df)[num_cols],
+    n_outliers = sapply(df[, num_cols], function(col) {
+      q1  <- quantile(col, 0.25, na.rm = TRUE)
+      q3  <- quantile(col, 0.75, na.rm = TRUE)
+      iqr <- q3 - q1
+      lower <- q1 - 1.5 * iqr
+      upper <- q3 + 1.5 * iqr
+      sum(col < lower | col > upper)
+    })
+  )
+  
+  # Return the dataframe 
+  return(outlier.df)
+}
+
+# Invoke the method count_outlier to get the outlier and store it in outlier.df
+outlier.df = count_outlier(df)
+
+outlier.df
+```
+# Plot the bar graphs 
+```{r}
+
+# Plot the point graphs to plot the count of the ouliers in the each columns 
+ggplot(outlier.df %>% filter(n_outliers > 0), aes(x = column, y = n_outliers)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(title = "Distribution of outlier counts (per feature)",
+       x = "Outlier count per feature", y = "Number of features") +
+  theme(axis.text.x = element_text(angle=45, hjust = 1))
+
+```
+
+# Separate the columns with the outliers and winsorized it to remove the outliers 
+```{r}
+
+# Get the columns with the outliers 
+outliers_cols = outlier.df %>% 
+                  filter(n_outliers > 0) %>% 
+                  pull(column)
+
+outliers_cols
+
+
+recipe.df = recipe.df %>%
+  # winsorize only the outlier columns
+  step_hai_winsorized_truncate(
+    outliers_cols,
+    fraction = 0.05
+  )
+  
+
+recipe.df
+```
+
+# Check the Scale of the numerical columns 
+  # Get the numerical columns 
+  # Check the scale using the SD method 
+```{r}
+
+# Get the numerical columns and store it in df_num
+df_num = df %>% select_if(is.numeric)
+
+# Create a dataframe with the sd range 
+df_sd_range = data.frame(
+                Features = colnames(df_num),            
+                SD = sapply(df_num, function(x) sd(x, na.rm = TRUE)),
+                Mean = sapply(df_num, function(x) mean(x, na.rm = TRUE))
+                ) %>% 
+                mutate( 
+                  Range = log10(abs(Mean - SD) + 1e-12), 
+                  )
+
+# Plot the bar graphs to plot 
+ggplot(df_sd_range, aes(x = Features, y = Range)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(title = "Distribution of Scale (per feature)",
+       x = "Scale values per feature", y = "Number of features") +
+  theme(axis.text.x = element_text(angle=45, hjust = 1))
+
+```
+
+# Normalize the values in the recipe.df 
+```{r}
+
+# Normalize the numerical predictors using srep normalize 
+recipe.df = recipe.df %>% 
+              step_normalize(all_numeric_predictors())
+
+recipe.df
+```
+
+## There are 4 characters column need to processed (Card_Category, Income_Category, Marital_Status & Education_Level). 
+  # Check the Unique values in the each column 
+  # Try to minimize the values and combine the values with same semantic meanings. 
+  # Encode the values with the recipe 
+```{r}
+
+# Create a vectors of the columns names as char_cols 
+char_cols = c("Card_Category", "Income_Category", "Marital_Status", "Education_Level", "Gender")
+
+# create a function to check the unique values in each of the columns and print the dataframe with the columns names 
+check_unique = function(df ,vec){
+  
+  # Loop the vector 
+  # Get the unique values and store it in col.unique
+  # Create a dataframe with vector and unique values 
+  return(tibble(
+    col = vec,
+    unique_values = lapply(df[vec], unique)
+  ) %>%
+  mutate(unique_values = map_chr(unique_values, ~ paste(.x, collapse = ", "))))
+}
+
+
+print(check_unique(df, char_cols))
+```
+
+# The Card_Category cannot be imputed, since those values are semantically different. The Gender has only M and F are semantically differnt. 
+# The Income_Category states in different ranges can be converted into Less than 40K, more than 120K, & Average Between 40K to 120K. 
+# The Marital_Status classify into 4 categories with 3 having the same semantic values, they are merged into 2 categories Married and Single.  
+# The Education_Level classified into 7 categories with 5 having the same semantic meaning, they are merged into 2 categories as Educated and Uneducated. 
+```{r}
+
+recipe.df = recipe.df %>% 
+              # mark unseen categories when new data arrives
+              step_novel(Income_Category) %>%
+              # Merge the Income_Category into Less than 40K, more than 120K, & Average Between 40K to 120K
+              step_mutate(Income_Category = fct_collapse(
+                Income_Category, 
+                "Less than 40K" = "Less than $40K",
+                "More than 120K" = "$120K +",
+                "Average Between 40K to 120K" = c(
+                  "$40K - $60K",
+                  "$60K - $80K",
+                  "$80K - $120K", 
+                  "Unknown"
+                )
+              )
+            ) %>%
+            # mark unseen categories when new data arrives
+            step_novel(Marital_Status) %>%
+            # Merge the Marital_Status into Married and Single
+            step_mutate(
+              Marital_Status = fct_collapse(
+                Marital_Status,
+                Married = "Married",
+                Single  = intersect(
+                  levels(Marital_Status),
+                  c("Single", "Unknown", "Divorced")
+                )
+              )
+            ) %>%
+            # mark unseen categories when new data arrives
+            step_novel(Education_Level) %>%
+            # Merge the Education_Level into Educated and Uneducated
+            step_mutate(
+              Education_Level = fct_collapse(
+                Education_Level, 
+                  Uneducated = c(
+                    "Uneducated", 
+                    "Unknown"
+                    ),
+                  Educated = c(
+                    "High School", 
+                    "Graduate", 
+                    "College", 
+                    "Post-Graduate", 
+                    "Doctorate"
+                  )
+                )
+              )
+            
+recipe.df            
+
+```
+# Encode all the above categorial variables with one-hot encoding. 
+```{r}
+
+# Categorical values 
+char_cols
+
+recipe.df = recipe.df %>% 
+              # One-hot encode using dummy method for all the character columns 
+              step_dummy(
+                char_cols, 
+                one_hot = TRUE 
+              )
+
+recipe.df
+
+```
+## Find the correlation and causion between the variables to check the variables relations.
+    # Plot the correlations and plot it. 
+```{r}
+
+# Find all the numerical columns 
+df_num
+
+# Find the correlation and store it in cor.mat 
+cor.mat = cor(df_num, use = "pairwise.complete.obs")
+
+cor.mat
+
+# convert to tidy format using pivot_longer
+corr_long = cor.mat %>%
+  as.data.frame() %>%
+  mutate(var1 = rownames(.)) %>% 
+  pivot_longer(
+    cols = -var1,
+    names_to = "var2",
+    values_to = "correlation"
+  )
+
+# Plot the correlation between the variables as heat map 
+ggplot(corr_long, aes(var1, var2, fill = correlation)) +
+  geom_tile() +
+  scale_fill_gradient2(
+    low = "steelblue",
+    high = "pink",
+    mid = "#90EE90",
+    midpoint = 0
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "", y = "", fill = "Correlation")
+
+```
+
+## The feature column is so unbalanced in the ratio of 15:85. To balance this, use the oversampleing SMOTE techinique. 
+```{r}
+
+recipe.df = recipe.df %>% 
+              # Oversample the data using SMOTE technique 
+              step_smote(Attrition_Flag)
+
+recipe.df
+```
+## Basic EDA and preprocessing are done with handled the missing values, checked the outliers in the numerical features and handled it, check the scales and normalized it, check the individual categorial values, handled the semantic relations by featured and encoded it, handled the imbalance by using SMOT.
+
+## Prepare the recipe 
+```{r}
+
+# Prepare the recipe with prep() method and store it in recipe.df_prep
+recipe.df_prep = prep(recipe.df)
+                    
+
+summary(recipe.df_prep)
+```
+
+## Bake it on the data 
+```{r}
+
+# Bake the prepared recipe with bake() and store it in recipe.df_bake with the train data 
+recipe.df_bake = bake(recipe.df_prep, df_train)
+
+summary(recipe.df_bake)
+
+```
+## Modelling and Validations 
+
+## K-fold cross validation 
+  # Split the train data into k-fold to validate and train the model 
+```{r}
+
+# set the seed 
+set.seed(seed_value)
+
+# Create the k-fold using vfold_cv() and store it in k.fold 
+k.fold = vfold_cv(df_train, v = 5, strata = "Attrition_Flag")
+
+summary(k.fold)
+
+```
+## Model Architecture 
+ # Create a XGBoost Model Architecture 
+ # Create and fit the workflow 
+ # Create an hyperparameter and tune it 
+ # Collect the metrics 
+ # Get the best parameter 
+ # Fit the parameter with the model and create a finalized model 
+
+## Create an architecture for the XGBoost algorithm
+```{r}
+
+# Create the XGBoost model and store it in xgboost.model 
+xgboost.model = boost_tree(
+  # Number of trees 
+  trees = tune(), 
+  # learning rate 
+  learn_rate = tune(),
+  # depth of tree
+  tree_depth = tune(), 
+) %>% 
+  # Set the mode as classification
+  set_mode("classification") %>%
+  # Set the engine as xgboost
+  set_engine(
+    "xgboost",
+    tree_method = "hist", 
+    device = "cuda",
+    max_bin     = 64,
+    nthread     = 10
+  )
+
+summary(xgboost.model)  
+
+sessionInfo()
+```
+## Create a workflow for the model and set the recipe and model to it
+```{r}
+
+# Create a workflow using workflow() and assign it to model.workflow 
+model.workflow = workflow() %>% 
+                  # Add the recipe 
+                  add_recipe(recipe.df) %>%
+                  # Add the model 
+                  add_model(xgboost.model)
+
+summary(model.workflow)
+```
+
+## Create a grid parameter for the Bayesian SearchCV 
+```{r}
+
+# Create a grid using extract_parameter_set_dials() and store it in model.grid 
+model.grid = extract_parameter_set_dials(model.workflow) %>% 
+              # update the tune grid parameters 
+              update(
+                # Number of trees 
+                trees = trees(range = c(100, 500)),
+                # learning rate
+                learn_rate = learn_rate(range = c(0.0001, 0.1)), 
+                # Tree depth 
+                tree_depth = tree_depth(range = c(3, 8))
+              )
+
+summary(model.grid)
+```
+
+## Create a Bayesian search CV and tune it 
+```{r}
+
+# Set the seed 
+set.seed(seed_value)
+
+# Create a inital grid and store it in inital.grid
+initial.grid = tune_grid(
+    # workflow 
+    object = model.workflow, 
+    # folds 
+    resamples = k.fold, 
+    # Number of grids 
+    grid = 10,
+    # param 
+    param_info = model.grid,
+    # Metrics 
+    metrics = metric_set(roc_auc, ppv, npv, accuracy)
+  )
+
+summary(initial.grid)
+
+# Create a Bayesian Grid CV and store it in bayesian.cv
+bayesian.cv = tune_bayes(
+  # workflow
+  model.workflow, 
+  # set the fold 
+  resamples = k.fold, 
+  # parameters to tune  
+  param_info = model.grid, 
+  # tuned grid 
+  initial = initial.grid,
+  # Number of iterations 
+  iter = 100, 
+  # metrics 
+  metrics = metric_set(roc_auc, ppv, npv, accuracy)
+)
+
+```
+
+## Show the metrics 
+```{r}
+# Collect the metrics 
+collect_metrics(bayesian.cv)
+
+```
+
+
+## Select the best parameter from the cv 
+```{r}
+
+# Get the best parameter from the for the f_meas and store it in best.parameters 
+best.parameters = bayesian.cv %>% 
+                    select_best(metric = "roc_auc")  
+
+best.parameters
+```
+
+
+## Get the metrics of the best parameter
+```{r}
+
+# Extract the metrics of the best parameter and store it best.parameters_metrics
+best.parameters_metrics = best.parameters %>%
+  filter(.config == best.parameters$.config)
+
+best.parameters_metrics
+
+```
+
+
+## Fit the best parameter to finalize the workflow model 
+```{r}
+
+# Fit the best parameter to get the best model and store it in final_model
+final_model = model.workflow %>%
+        finalize_workflow(best.parameters_metrics)
+
+final_model
+
+```
+
+## Model Testing and evaluations 
+  # last fit the model and get the scores of the model 
+  # Plot the confusion matrix for the model valuation 
+  # Plot the metrics
+  # Extract the best workflow and save it 
+  
+# Last fit the model and obtain the score of the final model
+```{r}
+
+# Fit the best model with the trained data to get the best model and store it in final_fitted_model_dt
+final_fitted_model_dt = final_model %>%
+                last_fit(df.split, 
+                         metrics = metric_set(accuracy, bal_accuracy, roc_auc, ppv, npv, f_meas, sens, spec, mcc))
+
+
+# Collect the metrics 
+collected_metrics = collect_metrics(final_fitted_model_dt)
+
+collected_metrics
+```
+
+# Plot the metrics of the model 
+```{r}
+
+# Create a dataframe to store the metrics and estimates to plot it. Store it in metrics.df 
+metrics.df = data.frame(
+  metrics = collected_metrics$.metric, 
+  values = collected_metrics$.estimate
+)
+
+metrics.df
+
+```
+
+```{r}
+
+# Plot the metrics 
+metrics.df %>%
+  ggplot(aes(x = reorder(metrics, values), y = values)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Model Performance Metrics",
+    x = "Metrics",
+    y = "Scores"
+  ) + 
+  theme_minimal()
+
+```
+
+# Plot the confusion matrics of the model evaluation data 
+```{r}
+
+# Collect the prediction data from the last fit model and store it in pred.data 
+pred.data = final_fitted_model_dt %>% 
+              collect_predictions()
+
+# Create a confusion matrix and store the values in confusion.matrix
+confusion.matrix = pred.data %>% 
+                    conf_mat(
+                      truth = Attrition_Flag, 
+                      estimate = .pred_class
+                      )
+
+summary(confusion.matrix)
+
+# auto plot the confusion matrix 
+autoplot(confusion.matrix, type = "heatmap") +
+  labs(title = "Confusion Matrix")
+
+```
+
+
+# Extract the workflow and save the workflow 
+```{r}
+
+# Extract the workflow using extract_workflow() and store it in finalized_model
+finalized_model = extract_workflow(final_fitted_model_dt)
+
+finalized_model
+
+# Save the model workflow as the rds file 
+model_file.path = "D:/VS_Codes/DataScience/Projects/Banking_Customer_Churn/r_xgb"
+saveRDS(finalized_model, file = file.path(model_file.path, "final_model.rds"))
+```
